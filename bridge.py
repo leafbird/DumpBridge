@@ -3,6 +3,9 @@ import threading
 import logging
 import socket
 import argparse
+import tempfile
+import time
+import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -10,73 +13,99 @@ logging.basicConfig(
 )
 log = logging.getLogger("dumpbridge")
 
+END_MARKER = "<END_COMMAND_OUTPUT>"
+
 
 class DumpSession:
-    """dotnet-dump analyze 프로세스를 관리하는 클래스."""
+    """dotnet-dump analyze 프로세스를 관리하는 클래스.
+
+    Windows에서 파이프 버퍼링 문제를 회피하기 위해 stdout을 임시 파일로
+    리다이렉트하고, 파일 폴링으로 출력을 수집한다.
+    완료 감지는 dotnet-dump가 출력하는 <END_COMMAND_OUTPUT> 마커를 사용한다.
+    """
 
     def __init__(self, dump_path: str):
         self._lock = threading.Lock()
-        self._result_ready = threading.Event()
-        self._result: str = ""
-        self._process_dead = False
+        self._outfile_path = tempfile.mktemp(suffix=".dumpbridge.txt")
+        self._outfile = open(self._outfile_path, "w+b")
+        self._read_pos = 0
 
         log.info("Starting dotnet-dump analyze: %s", dump_path)
         self._proc = subprocess.Popen(
             ["dotnet-dump", "analyze", dump_path],
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
+            stdout=self._outfile,
             stderr=subprocess.STDOUT,
-            bufsize=0,
         )
 
-        self._reader_thread = threading.Thread(
-            target=self._read_stdout, daemon=True
-        )
-        self._reader_thread.start()
-
-        # 초기 프롬프트 대기
+        # 초기 배너 + END_MARKER 대기
         log.info("Waiting for initial prompt...")
-        if not self._result_ready.wait(timeout=120):
-            raise RuntimeError("Timed out waiting for initial dotnet-dump prompt")
-        self._result_ready.clear()
+        self._wait_for_marker(timeout=120)
         log.info("dotnet-dump session ready.")
 
-    def _read_stdout(self):
-        """stdout을 byte 단위로 읽어 프롬프트를 감지한다."""
-        buf = b""
-        while True:
-            byte = self._proc.stdout.read(1)
-            if not byte:
-                self._process_dead = True
-                if buf:
-                    self._result = buf.decode("utf-8", errors="replace")
-                self._result_ready.set()
-                log.warning("dotnet-dump process exited.")
-                return
-            buf += byte
-            text = buf.decode("utf-8", errors="replace")
-            if text.endswith("\n> ") or text == "> ":
-                self._result = text[:-2]
-                buf = b""
-                self._result_ready.set()
+    def _wait_for_marker(self, timeout: float = 600) -> str:
+        """출력 파일을 폴링하여 END_MARKER가 나올 때까지 대기한다."""
+        start = time.time()
+        buf = ""
+        while time.time() - start < timeout:
+            self._outfile.flush()
+            self._outfile.seek(0, 2)
+            size = self._outfile.tell()
+            if size > self._read_pos:
+                self._outfile.seek(self._read_pos)
+                data = self._outfile.read()
+                self._read_pos = size
+                buf += data.decode("utf-8", errors="replace")
+                if END_MARKER in buf:
+                    return buf
+            if self._proc.poll() is not None:
+                return buf
+            time.sleep(0.1)
+        return ""
 
     def execute(self, command: str) -> str:
         """명령을 실행하고 결과를 반환한다. 스레드 안전."""
         with self._lock:
-            if self._process_dead:
+            if self._proc.poll() is not None:
                 return "[ERROR] dotnet-dump process is not running."
 
-            self._result_ready.clear()
+            # 현재 위치 기록 (이전 출력 건너뛰기)
+            self._outfile.seek(0, 2)
+            self._read_pos = self._outfile.tell()
+
             log.info("Executing: %s", command)
             self._proc.stdin.write((command + "\n").encode())
             self._proc.stdin.flush()
 
-            if not self._result_ready.wait(timeout=600):
+            raw = self._wait_for_marker(timeout=600)
+            if not raw:
                 return "[ERROR] Command timed out after 600 seconds."
 
-            result = self._result
-            self._result_ready.clear()
+            # 결과 파싱: 에코된 명령과 END_MARKER 제거
+            result = self._parse_output(raw, command)
             return result
+
+    @staticmethod
+    def _parse_output(raw: str, command: str) -> str:
+        """에코된 명령, 프롬프트, END_MARKER를 제거하고 순수 출력만 반환."""
+        # "> command\r\n출력...\r\n<END_COMMAND_OUTPUT>\r\n" 형태
+        # END_MARKER 이후 제거
+        idx = raw.find(END_MARKER)
+        if idx >= 0:
+            raw = raw[:idx]
+
+        # 에코된 명령 줄 제거 (">" 프롬프트 포함)
+        lines = raw.split("\n")
+        start = 0
+        for i, line in enumerate(lines):
+            stripped = line.rstrip("\r")
+            if stripped == "> " + command or stripped == ">" + command:
+                start = i + 1
+                break
+        result = "\n".join(lines[start:])
+
+        # 앞뒤 공백 정리
+        return result.strip("\r\n")
 
     def close(self):
         """dotnet-dump 프로세스를 종료한다."""
@@ -87,6 +116,11 @@ class DumpSession:
                 self._proc.wait(timeout=10)
         except Exception:
             self._proc.kill()
+        try:
+            self._outfile.close()
+            os.unlink(self._outfile_path)
+        except Exception:
+            pass
         log.info("dotnet-dump session closed.")
 
 
