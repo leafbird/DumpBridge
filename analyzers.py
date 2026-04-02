@@ -123,7 +123,96 @@ class HeapAnalyzer:
 
 
 class StackAnalyzer:
-    """Placeholder - will be implemented in Task 3."""
+    """clrstack -all 결과를 파싱하여 동일 콜스택 스레드를 그룹화한다."""
+
+    _THREAD_HEADER_RE = re.compile(r"^OS Thread Id:\s*0x([0-9a-fA-F]+)\s*\((\d+)\)")
+    _FRAME_RE = re.compile(r"^[0-9a-fA-F]+\s+[0-9a-fA-F]+\s+(.+)$")
 
     def query(self, args: list[str], execute_fn) -> str:
-        return "[ERROR] @stack-groups not yet implemented."
+        parser = argparse.ArgumentParser(prog="@stack-groups", add_help=False)
+        parser.add_argument("--max-frames", type=int, default=0)
+        parser.add_argument("--limit", type=int, default=0)
+        try:
+            opts = parser.parse_args(args)
+        except SystemExit:
+            return "[ERROR] Usage: @stack-groups [--max-frames=N] [--limit=N]"
+
+        raw = execute_fn("clrstack -all")
+        threads = self._parse(raw)
+
+        if not threads:
+            return "[ERROR] No threads found in clrstack -all output."
+
+        # Group by identical call stack
+        groups: dict[tuple, list] = {}
+        for t in threads:
+            frames = t["frames"]
+            if opts.max_frames > 0:
+                frames = frames[:opts.max_frames]
+            key = tuple(frames)
+            groups.setdefault(key, []).append(t)
+
+        # Sort by thread count descending
+        sorted_groups = sorted(groups.items(), key=lambda g: len(g[1]), reverse=True)
+
+        if opts.limit > 0:
+            sorted_groups = sorted_groups[:opts.limit]
+
+        # Format output
+        lines = []
+        for i, (frames, group_threads) in enumerate(sorted_groups, 1):
+            count = len(group_threads)
+            ids = [f"0x{t['os_id']}" for t in group_threads]
+            if len(ids) > 5:
+                id_str = ", ".join(ids[:5]) + f" (+{len(ids) - 5} more)"
+            else:
+                id_str = ", ".join(ids)
+
+            lines.append(f"=== Group {i}: {count} thread(s) ===")
+            lines.append(f"Thread IDs: {id_str}")
+            lines.append("Call Stack:")
+            if frames:
+                for frame in frames:
+                    lines.append(f"  {frame}")
+            else:
+                lines.append("  (empty stack)")
+            lines.append("")
+
+        total_threads = len(threads)
+        total_groups = len(sorted_groups)
+        lines.append(f"[{total_groups} groups from {total_threads} threads]")
+        return "\n".join(lines)
+
+    def _parse(self, raw: str) -> list[dict]:
+        threads = []
+        current = None
+        in_frames = False
+
+        for line in raw.split("\n"):
+            m = self._THREAD_HEADER_RE.match(line)
+            if m:
+                if current:
+                    threads.append(current)
+                current = {"os_id": m.group(1), "index": m.group(2), "frames": []}
+                in_frames = False
+                continue
+
+            if current is None:
+                continue
+
+            # "Child SP" header line → frames start next
+            if "Child SP" in line:
+                in_frames = True
+                continue
+
+            if in_frames:
+                fm = self._FRAME_RE.match(line.strip())
+                if fm:
+                    current["frames"].append(fm.group(1).strip())
+                elif line.strip() == "":
+                    in_frames = False
+
+        if current:
+            threads.append(current)
+
+        return threads
