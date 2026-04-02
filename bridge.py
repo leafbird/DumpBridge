@@ -6,6 +6,8 @@ import argparse
 import tempfile
 import time
 import os
+import shlex
+from analyzers import page_output, HeapAnalyzer, StackAnalyzer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,6 +16,38 @@ logging.basicConfig(
 log = logging.getLogger("dumpbridge")
 
 END_MARKER = "<END_COMMAND_OUTPUT>"
+
+
+class CommandRouter:
+    """Routes @ smart commands to appropriate handlers."""
+
+    def __init__(self):
+        self._heap = HeapAnalyzer()
+        self._stack = StackAnalyzer()
+
+    def handle(self, command: str, execute_fn) -> str:
+        try:
+            parts = shlex.split(command)
+        except ValueError as e:
+            return f"[ERROR] Invalid command syntax: {e}"
+
+        if not parts:
+            return "[ERROR] Empty command."
+
+        cmd_name = parts[0]
+        cmd_args = parts[1:]
+
+        try:
+            if cmd_name == "@page":
+                return page_output(cmd_args, execute_fn)
+            elif cmd_name == "@heap-stats":
+                return self._heap.query(cmd_args, execute_fn)
+            elif cmd_name == "@stack-groups":
+                return self._stack.query(cmd_args, execute_fn)
+            else:
+                return f"[ERROR] Unknown command: {cmd_name}\nAvailable: @page, @heap-stats, @stack-groups"
+        except Exception as e:
+            return f"[ERROR] Command failed: {e}"
 
 
 class DumpSession:
@@ -132,6 +166,7 @@ class BridgeServer:
         self._port = port
         self._server_socket: socket.socket | None = None
         self._running = False
+        self._router = CommandRouter()
 
     def start(self):
         self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -175,7 +210,10 @@ class BridgeServer:
             self._running = False
             return
 
-        result = self._session.execute(command)
+        if command.startswith("@"):
+            result = self._router.handle(command, self._session.execute)
+        else:
+            result = self._session.execute(command)
         # 대용량 출력 대비: sendall로 전체 전송
         conn.sendall(result.encode("utf-8"))
 
