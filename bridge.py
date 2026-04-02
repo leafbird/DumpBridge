@@ -31,17 +31,23 @@ class CommandRouter:
         except ValueError as e:
             return f"[ERROR] Invalid command syntax: {e}"
 
+        if not parts:
+            return "[ERROR] Empty command."
+
         cmd_name = parts[0]
         cmd_args = parts[1:]
 
-        if cmd_name == "@page":
-            return page_output(cmd_args, execute_fn)
-        elif cmd_name == "@heap-stats":
-            return self._heap.query(cmd_args, execute_fn)
-        elif cmd_name == "@stack-groups":
-            return self._stack.query(cmd_args, execute_fn)
-        else:
-            return f"[ERROR] Unknown command: {cmd_name}\nAvailable: @page, @heap-stats, @stack-groups"
+        try:
+            if cmd_name == "@page":
+                return page_output(cmd_args, execute_fn)
+            elif cmd_name == "@heap-stats":
+                return self._heap.query(cmd_args, execute_fn)
+            elif cmd_name == "@stack-groups":
+                return self._stack.query(cmd_args, execute_fn)
+            else:
+                return f"[ERROR] Unknown command: {cmd_name}\nAvailable: @page, @heap-stats, @stack-groups"
+        except Exception as e:
+            return f"[ERROR] Command failed: {e}"
 
 
 class DumpSession:

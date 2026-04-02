@@ -1,7 +1,6 @@
 """DumpBridge smart command analyzers."""
 
 import argparse
-import re
 
 
 def page_output(args: list[str], execute_fn) -> str:
@@ -22,6 +21,9 @@ def page_output(args: list[str], execute_fn) -> str:
     lines = result.split("\n")
     total = len(lines)
     page = lines[known.offset : known.offset + known.limit]
+
+    if not page:
+        return f"[No lines to show (offset {known.offset} exceeds {total} total lines)]"
 
     output = "\n".join(page)
     end = min(known.offset + known.limit, total)
