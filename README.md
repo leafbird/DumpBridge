@@ -1,10 +1,10 @@
 # DumpBridge
 
-`dotnet-dump analyze` 세션을 유지한 채 TCP 소켓으로 SOS 디버깅 명령을 보낼 수 있는 Python 브릿지 서버.
+`dotnet-dump analyze` 세션을 유지한 채 TCP 소켓으로 SOS 디버깅 명령을 보낼 수 있는 Python 브릿지 서버입니다.
 
 ## 왜 필요한가
 
-`dotnet-dump`는 인터랙티브 REPL이다. 비대화형으로 사용하려면 매 명령마다 덤프를 열고 닫아야 하는데, `gcroot`의 GC root 캐싱이 매번 초기화되어 수 분씩 소요된다. DumpBridge는 프로세스를 백그라운드에 유지하여 이 문제를 해결한다.
+`dotnet-dump`는 인터랙티브 REPL로 동작합니다. 비대화형으로 사용하려면 매 명령마다 덤프를 열고 닫아야 하는데, `gcroot`의 GC root 캐싱이 매번 초기화되어 수 분씩 소요됩니다. DumpBridge는 프로세스를 백그라운드에 유지하여 이 문제를 해결합니다.
 
 ## 아키텍처
 
@@ -44,9 +44,9 @@ python client.py "EXIT"
 
 ## 스마트 커맨드
 
-`@`로 시작하는 명령은 DumpBridge가 가로채서 서버 측에서 처리한다. 그 외는 dotnet-dump에 그대로 전달된다.
+`@`로 시작하는 명령은 DumpBridge가 가로채서 서버 측에서 처리합니다. 그 외는 dotnet-dump에 그대로 전달됩니다.
 
-**에이전트 참고**: 사용 가능한 스마트 커맨드와 옵션을 모르면 `@help`를 먼저 실행하라. 서버가 전체 명령 레퍼런스를 반환한다.
+**에이전트 참고**: 사용 가능한 스마트 커맨드와 옵션을 모르면 `@help`를 먼저 실행하세요. 서버가 전체 명령 레퍼런스를 반환합니다.
 
 ```bash
 python client.py "@help"
@@ -54,7 +54,7 @@ python client.py "@help"
 
 ### @page
 
-임의 명령 결과에 라인 기반 페이징을 적용한다.
+임의 명령 결과에 라인 기반 페이징을 적용합니다.
 
 ```bash
 @page [--offset=N] [--limit=N] <command>
@@ -67,7 +67,7 @@ python client.py "@page --offset=100 --limit=50 dumpheap -type System.String"
 
 ### @heap-stats
 
-`dumpheap -stat` 결과를 파싱/캐싱하여 정렬, 필터, 페이징을 제공한다. 첫 호출 시 캐싱되며 이후 호출은 즉시 응답한다.
+`dumpheap -stat` 결과를 파싱/캐싱하여 정렬, 필터, 페이징을 제공합니다. 첫 호출 시 캐싱되며 이후 호출은 즉시 응답합니다.
 
 ```bash
 @heap-stats [--sort=count|size|name] [--desc] [--offset=N] [--limit=N] [--filter=PATTERN] [--refresh]
@@ -95,7 +95,7 @@ python client.py "@heap-stats --refresh --sort=size --desc"
 
 ### @stack-groups
 
-`clrstack -all` 결과를 파싱하여 동일 콜스택을 가진 스레드를 그룹화한다. 스레드 수가 많은 덤프에서 핵심을 빠르게 파악할 수 있다.
+`clrstack -all` 결과를 파싱하여 동일 콜스택을 가진 스레드를 그룹화합니다. 스레드 수가 많은 덤프에서 핵심을 빠르게 파악할 수 있습니다.
 
 ```bash
 @stack-groups [--max-frames=N] [--limit=N]
