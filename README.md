@@ -46,6 +46,12 @@ python client.py "EXIT"
 
 `@`로 시작하는 명령은 DumpBridge가 가로채서 서버 측에서 처리한다. 그 외는 dotnet-dump에 그대로 전달된다.
 
+**에이전트 참고**: 사용 가능한 스마트 커맨드와 옵션을 모르면 `@help`를 먼저 실행하라. 서버가 전체 명령 레퍼런스를 반환한다.
+
+```bash
+python client.py "@help"
+```
+
 ### @page
 
 임의 명령 결과에 라인 기반 페이징을 적용한다.
