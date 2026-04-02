@@ -21,6 +21,34 @@ END_MARKER = "<END_COMMAND_OUTPUT>"
 class CommandRouter:
     """Routes @ smart commands to appropriate handlers."""
 
+    _HELP = """\
+DumpBridge Smart Commands
+=========================
+Any command without @ prefix is passed directly to dotnet-dump.
+
+@help
+  Show this help message.
+
+@page [--offset=N] [--limit=N] <command>
+  Line-based paging for any dotnet-dump command output.
+  Defaults: offset=0, limit=50
+
+@heap-stats [--sort=count|size|name] [--desc] [--offset=N] [--limit=N] [--filter=PATTERN] [--refresh]
+  Cached dumpheap -stat with sort/filter/paging. First call runs dumpheap -stat
+  and caches the result. Subsequent calls use cache (instant).
+  --filter uses regex (case-insensitive) on class name.
+  --refresh forces re-execution and cache update.
+  Defaults: offset=0, limit=50
+
+@stack-groups [--max-frames=N] [--limit=N]
+  Groups threads by identical call stack from clrstack -all.
+  --max-frames: only compare top N frames (0=all).
+  --limit: show top N groups (0=all).
+  Sorted by thread count descending.
+
+EXIT
+  Shut down the DumpBridge server."""
+
     def __init__(self):
         self._heap = HeapAnalyzer()
         self._stack = StackAnalyzer()
@@ -38,14 +66,16 @@ class CommandRouter:
         cmd_args = parts[1:]
 
         try:
-            if cmd_name == "@page":
+            if cmd_name == "@help":
+                return self._HELP
+            elif cmd_name == "@page":
                 return page_output(cmd_args, execute_fn)
             elif cmd_name == "@heap-stats":
                 return self._heap.query(cmd_args, execute_fn)
             elif cmd_name == "@stack-groups":
                 return self._stack.query(cmd_args, execute_fn)
             else:
-                return f"[ERROR] Unknown command: {cmd_name}\nAvailable: @page, @heap-stats, @stack-groups"
+                return f"[ERROR] Unknown command: {cmd_name}\nRun @help for available commands."
         except Exception as e:
             return f"[ERROR] Command failed: {e}"
 
