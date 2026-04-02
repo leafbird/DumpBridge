@@ -1,6 +1,8 @@
 import subprocess
 import threading
 import logging
+import socket
+import argparse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,9 +90,83 @@ class DumpSession:
         log.info("dotnet-dump session closed.")
 
 
+class BridgeServer:
+    """TCP 소켓 서버. 클라이언트 명령을 DumpSession에 전달한다."""
+
+    def __init__(self, session: DumpSession, port: int = 9999):
+        self._session = session
+        self._port = port
+        self._server_socket: socket.socket | None = None
+        self._running = False
+
+    def start(self):
+        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server_socket.bind(("127.0.0.1", self._port))
+        self._server_socket.listen(1)
+        self._server_socket.settimeout(1.0)  # accept 타임아웃 (종료 체크용)
+        self._running = True
+        log.info("READY - listening on 127.0.0.1:%d", self._port)
+
+        while self._running:
+            try:
+                conn, addr = self._server_socket.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                self._handle_client(conn)
+            except Exception as e:
+                log.error("Error handling client: %s", e)
+            finally:
+                conn.close()
+
+    def _handle_client(self, conn: socket.socket):
+        # 클라이언트가 shutdown(SHUT_WR) 할 때까지 명령 수신
+        data = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+
+        command = data.decode("utf-8", errors="replace").strip()
+        if not command:
+            return
+
+        if command.upper() == "EXIT":
+            log.info("EXIT command received. Shutting down.")
+            conn.sendall(b"Server shutting down.\n")
+            self._running = False
+            return
+
+        result = self._session.execute(command)
+        # 대용량 출력 대비: sendall로 전체 전송
+        conn.sendall(result.encode("utf-8"))
+
+    def stop(self):
+        self._running = False
+        if self._server_socket:
+            self._server_socket.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="DumpBridge - dotnet-dump TCP bridge")
+    parser.add_argument("dump_path", help="Path to the dump file")
+    parser.add_argument("--port", type=int, default=9999, help="TCP port (default: 9999)")
+    args = parser.parse_args()
+
+    session = DumpSession(args.dump_path)
+    server = BridgeServer(session, args.port)
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        log.info("Interrupted.")
+    finally:
+        server.stop()
+        session.close()
+
+
 if __name__ == "__main__":
-    import sys
-    session = DumpSession(sys.argv[1])
-    print("=== execute test ===")
-    print(session.execute("dumpheap -stat")[:500])
-    session.close()
+    main()
