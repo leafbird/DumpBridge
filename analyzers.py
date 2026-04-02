@@ -35,7 +35,7 @@ def page_output(args: list[str], execute_fn) -> str:
 class HeapAnalyzer:
     """dumpheap -stat 결과를 파싱/캐싱하여 정렬·필터·페이징을 제공한다."""
 
-    _ROW_RE = re.compile(r"^\s*([0-9a-fA-F]+)\s+(\d+)\s+(\d+)\s+(.+)$")
+    _ROW_RE = re.compile(r"^\s*([0-9a-fA-F]+)\s+([\d,]+)\s+([\d,]+)\s+(.+)$")
     _TOTAL_RE = re.compile(r"^Total\s+([\d,]+)\s+objects.*?([\d,]+)\s+bytes", re.IGNORECASE)
 
     def __init__(self):
@@ -107,8 +107,8 @@ class HeapAnalyzer:
             if m:
                 entries.append({
                     "mt": m.group(1),
-                    "count": int(m.group(2)),
-                    "size": int(m.group(3)),
+                    "count": int(m.group(2).replace(",", "")),
+                    "size": int(m.group(3).replace(",", "")),
                     "name": m.group(4).strip(),
                 })
                 continue
@@ -125,7 +125,8 @@ class HeapAnalyzer:
 class StackAnalyzer:
     """clrstack -all 결과를 파싱하여 동일 콜스택 스레드를 그룹화한다."""
 
-    _THREAD_HEADER_RE = re.compile(r"^OS Thread Id:\s*0x([0-9a-fA-F]+)\s*\((\d+)\)")
+    _THREAD_HEADER_RE = re.compile(r"^OS Thread Id:\s*0x([0-9a-fA-F]+)(?:\s*\((\d+)\))?")
+
     _FRAME_RE = re.compile(r"^[0-9a-fA-F]+\s+[0-9a-fA-F]+\s+(.+)$")
 
     def query(self, args: list[str], execute_fn) -> str:
@@ -193,7 +194,7 @@ class StackAnalyzer:
             if m:
                 if current:
                     threads.append(current)
-                current = {"os_id": m.group(1), "index": m.group(2), "frames": []}
+                current = {"os_id": m.group(1), "index": m.group(2) or "?", "frames": []}
                 in_frames = False
                 continue
 
@@ -208,7 +209,10 @@ class StackAnalyzer:
             if in_frames:
                 fm = self._FRAME_RE.match(line.strip())
                 if fm:
-                    current["frames"].append(fm.group(1).strip())
+                    call_site = fm.group(1).strip()
+                    # Skip native/internal frames (addresses differ per thread, break grouping)
+                    if not call_site.startswith("["):
+                        current["frames"].append(call_site)
                 elif line.strip() == "":
                     in_frames = False
 
