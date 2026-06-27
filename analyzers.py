@@ -42,6 +42,7 @@ class HeapAnalyzer:
         self._entries: list[dict] | None = None
         self._total_count: int = 0
         self._total_size: int = 0
+        self._corrupt: str | None = None  # 오염 감지 사유 (정상이면 None)
 
     def query(self, args: list[str], execute_fn) -> str:
         parser = argparse.ArgumentParser(prog="@heap-stats", add_help=False)
@@ -62,6 +63,18 @@ class HeapAnalyzer:
 
         if self._entries is None:
             return "[ERROR] Failed to parse dumpheap -stat output."
+
+        # 보존법칙 가드 (개선 E): 깨진 캡처를 데이터로 보고하지 않는다.
+        if self._corrupt:
+            return (
+                "[ERROR] dumpheap -stat capture appears CORRUPT — refusing to report.\n"
+                f"  Reason: {self._corrupt}\n"
+                "  This is the classic DumpBridge large-output desync (heap addresses\n"
+                "  parsed as counts/sizes). Do NOT trust any aggregate from it.\n"
+                "  Fix: re-run with '@heap-stats --refresh', or use a focused\n"
+                "  'dumpheap -stat -type <T>' / 'gcheapstat' instead, and cross-check\n"
+                "  that no single type's count or size exceeds the heap Total."
+            )
 
         entries = self._entries
 
@@ -120,6 +133,43 @@ class HeapAnalyzer:
         self._entries = entries
         self._total_count = total_count
         self._total_size = total_size
+        self._corrupt = self._detect_corruption(entries, total_count, total_size)
+
+    @staticmethod
+    def _detect_corruption(entries, total_count, total_size) -> str | None:
+        """dumpheap -stat 캡처가 깨졌는지 보존법칙으로 판정한다.
+
+        진짜 -stat 은 타입당 1행이고, Total = 모든 행의 합이다. 어떤 단일 타입의
+        count/size 도 Total 을 넘을 수 없다. 넘으면 스트림 desync 로 주소가
+        count/size 칸에 섞여 들어온 것 → 신뢰 불가.
+        """
+        if not entries:
+            return None  # 빈 결과는 별도 처리 (호출측에서 parse 실패 메시지)
+
+        if total_count <= 0 or total_size <= 0:
+            return ("missing/zero 'Total ... objects ... bytes' line "
+                    f"(parsed {len(entries)} rows but no valid Total — likely truncated)")
+
+        # 개별 행이 전체를 초과 (단일 타입 > 힙 전체 = 물리적 불가능)
+        for e in entries:
+            if e["count"] > total_count:
+                return (f"type {e['name']!r} count {e['count']:,} exceeds heap Total "
+                        f"{total_count:,} objects")
+            if e["size"] > total_size:
+                return (f"type {e['name']!r} size {e['size']:,} exceeds heap Total "
+                        f"{total_size:,} bytes")
+
+        # 행 합이 Total 을 유의미하게 초과 (5% slack: -stat 은 정확히 일치하나
+        # 파싱 누락/중복 여지를 둠)
+        sum_count = sum(e["count"] for e in entries)
+        sum_size = sum(e["size"] for e in entries)
+        if sum_count > total_count * 1.05:
+            return (f"sum of per-type counts {sum_count:,} exceeds heap Total "
+                    f"{total_count:,} objects by >5%")
+        if sum_size > total_size * 1.05:
+            return (f"sum of per-type sizes {sum_size:,} exceeds heap Total "
+                    f"{total_size:,} bytes by >5%")
+        return None
 
 
 class StackAnalyzer:

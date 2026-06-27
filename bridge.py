@@ -8,6 +8,13 @@ import time
 import os
 import shlex
 from analyzers import page_output, HeapAnalyzer, StackAnalyzer
+from protocol import (
+    END_MARKER,
+    END_MARKER_BYTES,
+    extract_nth_block,
+    decode_block,
+    encode_frame,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,7 +22,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("dumpbridge")
 
-END_MARKER = "<END_COMMAND_OUTPUT>"
+DEFAULT_COMMAND_TIMEOUT = 1800  # 초. 풀 dumpheap -stat / 첫 gcroot 는 수~십 분 걸린다.
+DEFAULT_READY_TIMEOUT = 300     # 초. 덤프 로딩 + 초기 배너.
 
 
 class CommandRouter:
@@ -85,14 +93,29 @@ class DumpSession:
 
     Windows에서 파이프 버퍼링 문제를 회피하기 위해 stdout을 임시 파일로
     리다이렉트하고, 파일 폴링으로 출력을 수집한다.
-    완료 감지는 dotnet-dump가 출력하는 <END_COMMAND_OUTPUT> 마커를 사용한다.
+    완료 감지는 dotnet-dump가 명령마다 출력하는 <END_COMMAND_OUTPUT> 마커를 사용한다.
+
+    스트림 동기화(개선 A)
+    --------------------
+    dotnet-dump 는 싱글스레드 REPL 이라 명령을 받은 순서대로 처리하고,
+    각 명령(및 초기 배너)의 끝에 정확히 하나의 마커를 출력한다. 따라서
+    "지금까지 소비한 마커 직후"(`_read_pos`)에서부터 다음 마커까지를 읽으면
+    명령과 출력이 1:1 로 정렬된다.
+
+    예전 구현은 매 명령마다 파일 끝으로 seek 했는데, 직전 명령이 타임아웃으로
+    아직 출력 중이면 그 한가운데로 점프해 이후 모든 출력이 어긋났다(= 어제
+    dumpheap -stat 오염의 원인). 지금은 끝으로 seek 하지 않고 `_outstanding`
+    (아직 마커를 못 본 명령 수)을 추적한다. 한 명령이 타임아웃해도 다음 명령이
+    백로그 마커를 드레인하며 자기 블록만 반환하므로 영구히 동기 상태를 유지한다.
     """
 
-    def __init__(self, dump_path: str):
+    def __init__(self, dump_path: str, command_timeout: float = DEFAULT_COMMAND_TIMEOUT):
         self._lock = threading.Lock()
         self._outfile_path = tempfile.mktemp(suffix=".dumpbridge.txt")
         self._outfile = open(self._outfile_path, "w+b")
-        self._read_pos = 0
+        self._read_pos = 0          # 소비 완료한 마지막 마커 직후의 바이트 오프셋
+        self._outstanding = 0       # stdin 에 보냈으나 아직 마커를 못 본 명령 수
+        self._command_timeout = command_timeout
 
         log.info("Starting dotnet-dump analyze: %s", dump_path)
         self._proc = subprocess.Popen(
@@ -102,30 +125,48 @@ class DumpSession:
             stderr=subprocess.STDOUT,
         )
 
-        # 초기 배너 + END_MARKER 대기
+        # 초기 배너도 마커 하나로 끝난다 → 그 블록을 소비해 _read_pos 를 정렬.
         log.info("Waiting for initial prompt...")
-        self._wait_for_marker(timeout=120)
+        self._outstanding = 1
+        ok, _ = self._drain_and_capture(timeout=DEFAULT_READY_TIMEOUT)
+        if not ok:
+            raise RuntimeError("dotnet-dump did not become ready (no initial marker).")
         log.info("dotnet-dump session ready.")
 
-    def _wait_for_marker(self, timeout: float = 600) -> str:
-        """출력 파일을 폴링하여 END_MARKER가 나올 때까지 대기한다."""
+    def _drain_and_capture(self, timeout: float):
+        """`_read_pos` 부터 전진하며 `_outstanding` 개의 마커를 찾는다.
+
+        성공: (True, block_bytes). `_read_pos` 를 마지막 마커 뒤로 전진시키고
+              `_outstanding` 을 0 으로 리셋. block 은 마지막(=현재) 명령의 출력.
+        실패(타임아웃/프로세스 종료): (False, b""). 상태를 그대로 둔다 →
+              다음 호출이 더 큰 _outstanding 으로 재시도하며 자연 복구된다.
+
+        파일 끝으로 seek 하지 않는다. 매 호출 `_read_pos` 부터 다시 읽으므로
+        타임아웃으로 남은 미완 출력도 다음에 그대로 이어 읽힌다.
+        """
         start = time.time()
-        buf = ""
-        while time.time() - start < timeout:
+        base = self._read_pos
+        pending = b""
+        while True:
             self._outfile.flush()
             self._outfile.seek(0, 2)
             size = self._outfile.tell()
-            if size > self._read_pos:
-                self._outfile.seek(self._read_pos)
-                data = self._outfile.read()
-                self._read_pos = size
-                buf += data.decode("utf-8", errors="replace")
-                if END_MARKER in buf:
-                    return buf
+            avail = size - (base + len(pending))
+            if avail > 0:
+                self._outfile.seek(base + len(pending))
+                pending += self._outfile.read()
+                found, block, end_off = extract_nth_block(
+                    pending, self._outstanding, END_MARKER_BYTES
+                )
+                if found:
+                    self._read_pos = base + end_off
+                    self._outstanding = 0
+                    return True, block
             if self._proc.poll() is not None:
-                return buf
+                return False, b""
+            if time.time() - start >= timeout:
+                return False, b""
             time.sleep(0.1)
-        return ""
 
     def execute(self, command: str) -> str:
         """명령을 실행하고 결과를 반환한다. 스레드 안전."""
@@ -133,21 +174,26 @@ class DumpSession:
             if self._proc.poll() is not None:
                 return "[ERROR] dotnet-dump process is not running."
 
-            # 현재 위치 기록 (이전 출력 건너뛰기)
-            self._outfile.seek(0, 2)
-            self._read_pos = self._outfile.tell()
-
             log.info("Executing: %s", command)
             self._proc.stdin.write((command + "\n").encode())
             self._proc.stdin.flush()
+            self._outstanding += 1
 
-            raw = self._wait_for_marker(timeout=600)
-            if not raw:
-                return "[ERROR] Command timed out after 600 seconds."
+            ok, block = self._drain_and_capture(self._command_timeout)
+            if not ok:
+                if self._proc.poll() is not None:
+                    return "[ERROR] dotnet-dump process died while executing."
+                return (
+                    f"[ERROR] Command timed out after {self._command_timeout:g}s. "
+                    f"dotnet-dump may still be processing it; {self._outstanding} "
+                    f"command(s) now outstanding. The stream stays marker-aligned, so "
+                    f"the next command will drain the backlog and return its own output "
+                    f"(no corruption). Re-run with a larger --timeout if this command is "
+                    f"genuinely slow (full 'dumpheap -stat' on a huge dump can take 10min+)."
+                )
 
-            # 결과 파싱: 에코된 명령과 END_MARKER 제거
-            result = self._parse_output(raw, command)
-            return result
+            text = decode_block(block)
+            return self._parse_output(text, command)
 
     @staticmethod
     def _parse_output(raw: str, command: str) -> str:
@@ -236,7 +282,7 @@ class BridgeServer:
 
         if command.upper() == "EXIT":
             log.info("EXIT command received. Shutting down.")
-            conn.sendall(b"Server shutting down.\n")
+            conn.sendall(encode_frame(b"Server shutting down.\n"))
             self._running = False
             return
 
@@ -244,8 +290,8 @@ class BridgeServer:
             result = self._router.handle(command, self._session.execute)
         else:
             result = self._session.execute(command)
-        # 대용량 출력 대비: sendall로 전체 전송
-        conn.sendall(result.encode("utf-8"))
+        # 길이 프리픽스 프레임으로 전송 (개선 C): client 가 절단을 감지할 수 있다.
+        conn.sendall(encode_frame(result.encode("utf-8")))
 
     def stop(self):
         self._running = False
@@ -257,9 +303,14 @@ def main():
     parser = argparse.ArgumentParser(description="DumpBridge - dotnet-dump TCP bridge")
     parser.add_argument("dump_path", help="Path to the dump file")
     parser.add_argument("--port", type=int, default=9999, help="TCP port (default: 9999)")
+    parser.add_argument(
+        "--timeout", type=float, default=DEFAULT_COMMAND_TIMEOUT,
+        help=f"Per-command timeout in seconds (default: {DEFAULT_COMMAND_TIMEOUT}). "
+             f"Full 'dumpheap -stat' or first 'gcroot' on a large dump can take 10min+.",
+    )
     args = parser.parse_args()
 
-    session = DumpSession(args.dump_path)
+    session = DumpSession(args.dump_path, command_timeout=args.timeout)
     server = BridgeServer(session, args.port)
     try:
         server.start()
