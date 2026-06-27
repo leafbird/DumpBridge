@@ -2,6 +2,8 @@
 
 `dotnet-dump analyze` 세션을 유지한 채 TCP 소켓으로 SOS 디버깅 명령을 보낼 수 있는 Python 브릿지 서버입니다.
 
+> 🤖 **이 도구로 실제 덤프를 분석하는 에이전트는 [`AGENTS.md`](AGENTS.md) 를 먼저 읽으세요.** 사용 절차·결과 해석 규율(보존법칙 등)·함정을 정리한 운영 가이드입니다.
+
 ## 왜 필요한가
 
 `dotnet-dump`는 인터랙티브 REPL로 동작합니다. 비대화형으로 사용하려면 매 명령마다 덤프를 열고 닫아야 하는데, `gcroot`의 GC root 캐싱이 매번 초기화되어 수 분씩 소요됩니다. DumpBridge는 프로세스를 백그라운드에 유지하여 이 문제를 해결합니다.
@@ -155,6 +157,7 @@ DumpBridge/
 ├── client.py          # TCP 클라이언트 유틸리티 (--port/--host)
 ├── kclient.py         # 포트 9999 고정 단축 클라이언트
 ├── test_dumpbridge.py # 단위 테스트 (덤프 불필요)
+├── AGENTS.md          # 에이전트 사용 지침 (절차·해석 규율·함정)
 ├── SPEC.md            # 설계 문서
 └── README.md
 ```
